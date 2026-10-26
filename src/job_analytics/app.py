@@ -8,18 +8,22 @@ in tests or replaced in production (open/closed + dependency inversion).
 from collections.abc import Iterator
 from dataclasses import dataclass
 
-from job_analytics.analytics import SummaryCalculator
+from job_analytics.analytics import SummaryCalculator, SummaryStrategy
 from job_analytics.errors import RecordValidationError
 from job_analytics.loading import RecordSource
-from job_analytics.models import JobRecord, RejectedRecord, SummaryReport
+from job_analytics.models import JobRecord, JobSummaryReport, RejectedRecord, SummaryReport
 from job_analytics.parsing import parse_record
 
 
 @dataclass(frozen=True, slots=True)
 class RunResult:
-    """Everything a run produced: the summary plus why records were rejected."""
+    """Everything a run produced: the summary plus why records were rejected.
 
-    report: SummaryReport
+    The report type depends on the injected strategy: a record-level
+    :class:`SummaryReport` or a per-job :class:`JobSummaryReport`.
+    """
+
+    report: SummaryReport | JobSummaryReport
     rejected_records: tuple[RejectedRecord, ...]
 
 
@@ -33,7 +37,7 @@ class JobAnalyticsApp:
     propagate out of :meth:`run`.
     """
 
-    def __init__(self, source: RecordSource, calculator: SummaryCalculator | None = None) -> None:
+    def __init__(self, source: RecordSource, calculator: SummaryStrategy | None = None) -> None:
         self._source = source
         self._calculator = calculator or SummaryCalculator()
 

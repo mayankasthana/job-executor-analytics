@@ -49,10 +49,23 @@ class RejectedRecord:
 
 @dataclass(frozen=True, slots=True)
 class SummaryReport:
-    """Aggregated view over the valid job records."""
+    """Aggregated view over the valid job records (one row per record)."""
 
     total_jobs: int
     successful_jobs: int
     failed_jobs: int
     retried_job_count: int
     average_successful_duration_seconds: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class JobSummaryReport:
+    """Aggregated view where each job's latest attempt decides the outcome."""
+
+    total_jobs: int
+    successful_jobs: int
+    failed_jobs: int
+    running_jobs: int
+    retried_job_count: int
+    successful_after_retry_count: int
+    average_final_attempt_duration_seconds: float | None = None

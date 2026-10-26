@@ -78,3 +78,31 @@ class TestModuleInvocation:
         )
         assert completed.returncode == 0
         assert json.loads(completed.stdout)["total_jobs"] == 1
+
+
+class TestJobView:
+    def test_the_job_view_reports_one_row_per_job(self, tmp_path, capsys):
+        path = write_records(
+            tmp_path,
+            [
+                valid_raw(job_id="a", status="failed", attempt=1),
+                valid_raw(job_id="a", attempt=2),
+                valid_raw(job_id="b"),
+            ],
+        )
+        assert main([str(path), "--view", "job", "--format", "json"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["total_jobs"] == 2
+        assert payload["successful_jobs"] == 2
+        assert payload["jobs_requiring_retries"] == 1
+        assert payload["successful_after_retries"] == 1
+
+    def test_the_job_view_text_labels_the_per_job_summary(self, tmp_path, capsys):
+        path = write_records(tmp_path, [valid_raw()])
+        assert main([str(path), "--view", "job"]) == 0
+        assert "(per job)" in capsys.readouterr().out
+
+    def test_an_unknown_view_exits_two(self):
+        with pytest.raises(SystemExit) as excinfo:
+            main(["a.json", "--view", "everything"])
+        assert excinfo.value.code == 2

@@ -10,6 +10,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from job_analytics.analytics import get_strategy
 from job_analytics.app import JobAnalyticsApp
 from job_analytics.errors import JobAnalyticsError
 from job_analytics.loading import JsonFileRecordSource
@@ -32,11 +33,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         default="text",
         help="output format (default: %(default)s)",
     )
+    parser.add_argument(
+        "--view",
+        choices=("record", "job"),
+        default="record",
+        help="aggregation view: per-record (default) or per-job, where the "
+        "latest attempt decides each job's outcome",
+    )
     args = parser.parse_args(argv)
 
     try:
         source = JsonFileRecordSource(args.input)
-        result = JobAnalyticsApp(source).run()
+        result = JobAnalyticsApp(source, get_strategy(args.view)).run()
     except JobAnalyticsError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

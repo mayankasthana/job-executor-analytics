@@ -2,6 +2,7 @@
 
 import pytest
 
+from job_analytics.analytics import JobSummaryCalculator
 from job_analytics.app import JobAnalyticsApp, RunResult
 from job_analytics.errors import InputFileError
 from job_analytics.models import SummaryReport
@@ -118,3 +119,19 @@ class TestStreamingSources:
 
         with pytest.raises(InputFileError):
             JobAnalyticsApp(LazyBrokenSource()).run()
+
+
+class TestStrategyInjection:
+    def test_a_job_level_strategy_can_be_injected(self):
+        source = StaticSource(
+            [
+                valid_raw(job_id="a", status="failed", attempt=1),
+                valid_raw(job_id="a", attempt=2),
+                valid_raw(job_id="b"),
+            ]
+        )
+        result = JobAnalyticsApp(source, JobSummaryCalculator()).run()
+        assert result.report.total_jobs == 2
+        assert result.report.successful_jobs == 2
+        assert result.report.retried_job_count == 1
+        assert result.report.successful_after_retry_count == 1

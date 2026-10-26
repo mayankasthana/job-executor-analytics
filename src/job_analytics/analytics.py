@@ -6,8 +6,15 @@ streaming sources flow straight through without materializing the records.
 """
 
 from collections.abc import Iterable
+from typing import Protocol
 
-from job_analytics.models import JobRecord, JobStatus, SummaryReport
+from job_analytics.models import JobRecord, JobStatus, JobSummaryReport, SummaryReport
+
+
+class SummaryStrategy(Protocol):
+    """Anything that can aggregate records into a summary report."""
+
+    def compute(self, records: Iterable[JobRecord]) -> SummaryReport | JobSummaryReport: ...
 
 
 class SummaryCalculator:
@@ -48,3 +55,60 @@ class SummaryCalculator:
                 duration_total / duration_count if duration_count else None
             ),
         )
+
+
+class JobSummaryCalculator:
+    """Aggregates records into a per-job view: the latest attempt wins.
+
+    Unlike the record-level summary, this needs per-job state
+    (O(distinct jobs) memory) for exact latest-attempt and retry semantics.
+    A job's final record is the one with the highest attempt number, ties
+    broken by the later started_at.
+    """
+
+    def compute(self, records: Iterable[JobRecord]) -> JobSummaryReport:
+        final_by_job: dict[str, JobRecord] = {}
+        retried: set[str] = set()
+        for record in records:
+            current = final_by_job.get(record.job_id)
+            if current is None or (record.attempt, record.started_at) >= (
+                current.attempt,
+                current.started_at,
+            ):
+                final_by_job[record.job_id] = record
+            if record.attempt > 1:
+                retried.add(record.job_id)
+
+        finals = list(final_by_job.values())
+        successful = [record for record in finals if record.is_successful]
+        durations = [
+            record.duration_seconds for record in successful if record.duration_seconds is not None
+        ]
+        return JobSummaryReport(
+            total_jobs=len(finals),
+            successful_jobs=len(successful),
+            failed_jobs=sum(1 for record in finals if record.status is JobStatus.FAILED),
+            running_jobs=sum(1 for record in finals if record.status is JobStatus.RUNNING),
+            retried_job_count=len(retried),
+            successful_after_retry_count=sum(
+                1 for record in successful if record.job_id in retried
+            ),
+            average_final_attempt_duration_seconds=(
+                sum(durations) / len(durations) if durations else None
+            ),
+        )
+
+
+_STRATEGIES: dict[str, type[SummaryCalculator | JobSummaryCalculator]] = {
+    "record": SummaryCalculator,
+    "job": JobSummaryCalculator,
+}
+
+
+def get_strategy(name: str) -> SummaryStrategy:
+    """Look up an aggregation strategy by CLI-facing name."""
+    try:
+        return _STRATEGIES[name]()
+    except KeyError:
+        available = ", ".join(sorted(_STRATEGIES))
+        raise ValueError(f"unknown view {name!r} (available: {available})") from None
