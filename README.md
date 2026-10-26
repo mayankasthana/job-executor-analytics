@@ -9,9 +9,27 @@ JSON file, validates them, and produces a **summary report**:
 - average successful-job duration
 - jobs that required retries
 
+The default view is **per-record**. `--view job` switches to a **per-job**
+aggregation where each job's latest attempt decides its outcome — including how
+many jobs succeeded after retrying:
+
+```text
+Job execution summary (per job)
+  Total jobs: 7
+  Successful jobs: 5
+  Failed jobs: 1
+  Running jobs: 1
+  Jobs requiring retries: 3
+  Successful after retries: 2
+  Average final-attempt duration: 375.1s
+  Rejected records: 0
+```
+
 Malformed records are **rejected individually with a reason** — one bad record
-never aborts the run. The runtime is **standard library only** (Python 3.12+);
-development tooling uses `uv`, `pytest`, and `ruff`.
+never aborts the run. Records **stream** (peak memory is O(largest record), not
+O(file size)). Validation runs on a declarative **pydantic** schema; everything
+else is standard library (Python 3.12+). Development tooling: `uv`, `pytest`,
+`ruff`, and `mypy --strict`.
 
 ## What it does
 
@@ -91,7 +109,7 @@ python -m job_analytics data/jobs.json
 ## Usage
 
 ```text
-usage: job_analytics [-h] [--format {text,json}] input
+usage: job_analytics [-h] [--format {text,json}] [--view {record,job}] input
 
 positional arguments:
   input                 path to a JSON file containing a top-level array of records
@@ -99,6 +117,7 @@ positional arguments:
 options:
   -h, --help            show this help message and exit
   --format {text,json}  output format (default: text)
+  --view {record,job}   aggregation view (default: record)
 ```
 
 Exit codes:
@@ -111,11 +130,14 @@ Exit codes:
 Programmatic use of the public API (re-exported from the package root):
 
 ```python
-from job_analytics import JobAnalyticsApp, JsonFileRecordSource
+from job_analytics import JobAnalyticsApp, JobSummaryCalculator, JsonFileRecordSource
 
 result = JobAnalyticsApp(JsonFileRecordSource("data/jobs.json")).run()
 print(result.report)  # SummaryReport(...)
 print(result.rejected_records)  # tuple[RejectedRecord, ...]
+
+per_job = JobAnalyticsApp(JsonFileRecordSource("data/jobs.json"), JobSummaryCalculator()).run()
+print(per_job.report)  # JobSummaryReport(...)
 ```
 
 ## How it works
@@ -132,14 +154,15 @@ JsonFileRecordSource ──▶ JobAnalyticsApp ──▶ SummaryCalculator ─�
 
 | Module | Responsibility | SOLID principle it serves |
 | --- | --- | --- |
-| `models.py` | Immutable domain data (`JobStatus`, `JobRecord`, `RejectedRecord`, `SummaryReport`) | Single Responsibility — pure data, no I/O |
+| `models.py` | Immutable domain data (`JobStatus`, `JobRecord`, `RejectedRecord`, `SummaryReport`, `JobSummaryReport`) | Single Responsibility — pure data, no I/O |
 | `errors.py` | Deliberate exception hierarchy rooted at `JobAnalyticsError` | LSP-friendly handling: callers catch the base |
-| `parsing.py` | Raw JSON value → validated `JobRecord`, or a named rejection reason | Single Responsibility — one definition of "valid" |
-| `loading.py` | `RecordSource` protocol + JSON file implementation | Dependency Inversion — the app depends on the protocol, not files |
-| `analytics.py` | `SummaryCalculator`: counts, average duration, retry detection | Open/Closed — computation is a pure, replaceable strategy |
-| `app.py` | `JobAnalyticsApp`: load → parse → compute, injecting source + calculator | Dependency Inversion — every dependency is injectable |
-| `reporting.py` | `Reporter` protocol with `JsonReporter` / `TextReporter` in a registry | Open/Closed — new formats register without touching the pipeline |
-| `cli.py` | argparse adapter, exit codes, error rendering | Single Responsibility — no business logic |
+| `schema.py` | Declarative pydantic schema: the single definition of a valid record | Single Responsibility — shape and coercion rules declared, not coded |
+| `parsing.py` | Seam: raw JSON value → validated `JobRecord`, or a named rejection reason | Dependency Inversion — the schema engine sits behind a stable seam |
+| `loading.py` | `RecordSource` protocol + streaming JSON-array file source | Dependency Inversion — the app depends on the protocol, not files |
+| `analytics.py` | `SummaryCalculator` (per-record) and `JobSummaryCalculator` (per-job) behind a `SummaryStrategy` protocol | Open/Closed — new aggregation views plug in without touching the app |
+| `app.py` | `JobAnalyticsApp`: load → parse → compute, injecting source + strategy | Dependency Inversion — every dependency is injectable |
+| `reporting.py` | `Reporter` protocol; both reporters render either report type via dispatch tables | Open/Closed — new formats and report types register, not branch |
+| `cli.py` | argparse adapter (`--format`, `--view`), exit codes, error rendering | Single Responsibility — no business logic |
 
 Data flows one way: `loading` produces raw values, `parsing` produces trusted
 `JobRecord`s, `analytics` consumes records and returns a `SummaryReport`, and
@@ -172,6 +195,12 @@ The exercise leaves several details open; these are the decisions made and why.
      count only toward the total.
    - "jobs that required retries" counts **distinct `job_id`s** having any record
      with `attempt > 1`.
+   The default summary is record-level. `--view job` aggregates per job instead:
+   a job's **latest attempt wins** (highest `attempt`, ties broken by the later
+   `started_at`), which decides `successful_jobs` / `failed_jobs` /
+   `running_jobs`; `successful_after_retries` counts jobs whose final attempt
+   succeeded after any `attempt > 1`; the average uses only final successful
+   attempts.
 3. **Statuses.** Recognized values (case/whitespace-insensitive) are
    `success`, `failed`, `running`. Any other value — including plausible
    variants like `succeeded` — is a malformed record, not a guess.
@@ -195,10 +224,13 @@ The exercise leaves several details open; these are the decisions made and why.
 9. **Empty input** (an empty array, or all records rejected) yields a zeroed
    summary with `average_successful_duration_seconds: null` rather than an
    error or `NaN`.
-10. **Stdlib-only runtime.** JSON parsing and validation are simple enough that
-    `pydantic` would add a dependency without changing behavior; `dataclasses`
-    + explicit rules keep the validation logic visible and testable. (Third-party
-    packages were allowed but not required.)
+10. **Pydantic for validation.** The first build was stdlib-only with hand-rolled
+    rules; adopting the improvement list, validation now runs on a declarative
+    pydantic schema (`schema.py`) — coercion and error structure centralized,
+    user-facing messages preserved. The swap happened behind the unchanged
+    `parse_record` seam: every behavior spec passed unmodified, which is exactly
+    what seam tests are for. pydantic is the package's one runtime dependency;
+    everything else stays standard library.
 11. **Rejections are reported, not silent.** Both output formats disclose how
     many records were rejected; the text format lists each reason. Silent
     data loss is the one unacceptable failure mode for an analytics tool.
@@ -210,20 +242,28 @@ Run everything with:
 ```bash
 make test        # pytest
 make lint        # ruff check + format check
-make verify      # tests + lint + CLI-vs-oracle + repo hygiene gates
+make type        # mypy --strict
+make verify      # all gates: tests, lint, types, oracles (record/job/streaming), repo hygiene
 ```
 
-The suite (109 tests) is written test-first and targets **public seams only** —
+The suite (126 tests) is written test-first and targets **public seams only** —
 no tests against private helpers, no mocks of internals:
 
 | Seam | What's specified |
 | --- | --- |
-| `parsing.parse_record` | Every validation rule, including the `bool`-as-`int` attempt trap, naive timestamps, out-of-order timestamps, and per-field error messages |
+| `parsing.parse_record` | Every validation rule, including the `bool`-as-`int` attempt trap, naive timestamps, out-of-order timestamps, and per-field error messages. These specs pinned the seam while the engine was swapped to the pydantic schema — they passed unmodified through the swap |
 | `loading.JsonFileRecordSource` | Array documents, empty arrays, missing files, invalid JSON, non-array roots; streaming laziness, error timing with line numbers, and chunk-boundary stress (sizes 1–64) with `json.loads` as the oracle |
-| `analytics.SummaryCalculator` | A hand-computed end-to-end scenario, edge cases (empty input, failures-only, unfinished successes, retry counting per distinct job), and one-shot iterable consumption |
-| `app.JobAnalyticsApp` | Orchestration with fake in-memory and generator sources — rejections keep their original positions; source errors propagate, including lazily raised ones |
-| `reporting` | Exact JSON payload (literal expected values), text content, rejection disclosure, reporter registry |
-| `cli.main` | End-to-end via `capsys` and a real `python -m job_analytics` subprocess: exit codes 0/2, stderr errors, malformed input still exiting 0 |
+| `analytics.SummaryCalculator` / `JobSummaryCalculator` | A hand-computed end-to-end scenario, edge cases (empty input, failures-only, unfinished successes, retry counting per distinct job), one-shot iterable consumption, and the per-job view (latest attempt wins, tie-breaking, recovery counting, final-attempt average) |
+| `app.JobAnalyticsApp` | Orchestration with fake in-memory and generator sources — rejections keep their original positions; source errors propagate, including lazily raised ones; strategies are injectable |
+| `reporting` | Exact JSON payloads for both report types (literal expected values), text content, rejection disclosure, reporter registry |
+| `cli.main` | End-to-end via `capsys` and a real `python -m job_analytics` subprocess: exit codes 0/2, stderr errors, malformed input still exiting 0, `--view job` payloads |
+
+Expected values are worked examples computed by hand (an independent source of
+truth), and `scripts/verify.py` goes further: it **recomputes the expected
+summaries — record-level, per-job, and streaming — from the raw sample JSON with
+its own logic** and diffs them against the CLI's output, so the sample data and
+the package cannot quietly drift apart. It also proves pydantic is the declared
+validation engine and that `mypy --strict` stays clean.
 
 Expected values are worked examples computed by hand (an independent source of
 truth), and `scripts/verify.py` goes further: it **recomputes the expected
@@ -239,33 +279,24 @@ intended durations.
 
 Honest list, roughly in order of value:
 
-1. **Pydantic (or `TypeAdapter`) for schema validation.** Hand-rolled rules are
-   readable but grow; a schema library would centralize coercion and error
-   messages if the record shape keeps evolving.
-2. **Job-level aggregation semantics.** The summary is record-level (see
-   assumption 2). A real deployment likely wants both views: per-record and
-   per-job (latest attempt wins, first-attempt-to-success funnels, retry
-   success rates). The `SummaryCalculator` seam is ready for a second strategy.
-3. **Retry-window definition.** "Required retries" currently ignores *when*
+1. **Retry-window definition.** "Required retries" currently ignores *when*
    attempts happened and which attempt ultimately succeeded. Time-aware retry
    analytics (e.g., success rate after N attempts) would be more actionable.
-4. **Output options.** `--output <file>`, CSV/markdown reporters (the registry
+2. **Output options.** `--output <file>`, CSV/markdown reporters (the registry
    makes this a two-class change), and a `--strict` flag that escalates any
    rejection to exit code 1 for pipelines that want fail-fast behavior.
-5. **Structured logging.** Rejections currently live only in the report; a
+3. **Structured logging.** Rejections currently live only in the report; a
    `logging` hook (or JSON-lines diagnostics stream) would help operators
    audit data quality over time.
-6. **Property-based tests.** `hypothesis` round-trip properties (e.g., summary
+4. **Property-based tests.** `hypothesis` round-trip properties (e.g., summary
    counts always sum consistently; parsing never raises anything other than
    `RecordValidationError`) would harden the parser beyond example cases.
-7. **Performance headroom.** The file is streamed and aggregation is a single
+5. **Performance headroom.** The file is streamed and aggregation is a single
    O(n) pass, so the remaining cost is per-element `raw_decode` versus one bulk
    `json.loads` — a constant factor that only matters at extreme scale, where a
    line-delimited JSON input format would be the better lever.
-8. **Packaging/publishing.** Console-script entry point (`[project.scripts]`),
+6. **Packaging/publishing.** Console-script entry point (`[project.scripts]`),
    pinned lock for CI, a `LICENSE`, and publishing to a private index.
-9. **Type checking.** The code is fully annotated; adding `mypy --strict` (or
-   `pyright`) to CI would keep it that way.
 
 ## Project structure
 
