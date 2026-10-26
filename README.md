@@ -76,6 +76,7 @@ make setup        # uv sync: creates .venv, installs pytest + ruff
 make check        # lint + full test suite
 make run          # run the CLI on the committed clean sample
 make run SAMPLE=data/jobs_malformed.json   # ...and on the malformed sample
+uv run python -m job_analytics data/jobs.json --format json   # or invoke it directly
 ```
 
 Without `uv`, any Python 3.12+ venv works:
