@@ -1,102 +1,47 @@
-"""Validation: raw JSON values in, trusted :class:`JobRecord`s out.
+"""Validation seam: raw JSON values in, trusted :class:`JobRecord`s out.
 
-Every rule lives here so that "what makes a record valid" has exactly one
-definition. The parser never touches the filesystem and never aggregates —
-those are the loading and analytics layers' jobs.
+The rules live on the declarative schema in ``schema.py`` (the single
+definition of "what makes a record valid"); this module is the seam that
+turns one raw value into a :class:`JobRecord` or a
+:class:`RecordValidationError` with a human-readable reason. Rejections are
+expected on real data; callers collect them instead of aborting the run.
 """
 
-from datetime import UTC, datetime
 from typing import Any
 
-from job_analytics.errors import RecordValidationError
-from job_analytics.models import JobRecord, JobStatus
+from pydantic import ValidationError
 
-_ISO_8601_HINT = "an ISO-8601 timestamp string"
+from job_analytics.errors import RecordValidationError
+from job_analytics.models import JobRecord
+from job_analytics.schema import JobRecordSchema
+
+_NOT_AN_OBJECT = "record is not a JSON object"
+_VALUE_ERROR_PREFIX = "Value error, "
 
 
 def parse_record(raw: Any) -> JobRecord:
     """Convert one raw JSON value into a validated :class:`JobRecord`.
 
-    Raises :class:`RecordValidationError` with a human-readable reason
-    otherwise. Rejections are expected on real data; callers collect them
-    instead of aborting the whole run.
+    Raises :class:`RecordValidationError` with the first failing rule's
+    human-readable reason otherwise (pydantic collects every violation; the
+    first, in field-declaration order, is reported).
     """
     if not isinstance(raw, dict):
-        raise RecordValidationError("record is not a JSON object")
+        raise RecordValidationError(_NOT_AN_OBJECT)
+    try:
+        model = JobRecordSchema.model_validate(raw)
+    except ValidationError as exc:
+        raise RecordValidationError(_format_first_error(exc)) from None
+    return model.to_record()
 
-    job_id = _required_text(raw, "job_id")
-    status = _parse_status(raw)
-    started_at = _parse_timestamp(raw, "started_at", required=True)
-    finished_at = _parse_timestamp(raw, "finished_at", required=False)
-    attempt = _parse_attempt(raw)
 
-    if finished_at is not None and finished_at < started_at:
-        raise RecordValidationError(
-            "field 'finished_at' is before 'started_at' "
-            f"({finished_at.isoformat()} < {started_at.isoformat()})"
+def _format_first_error(exc: ValidationError) -> str:
+    error = exc.errors()[0]
+    error_type: str = error["type"]
+    if error_type == "missing":
+        return f"missing field: {error['loc'][0]}"
+    if error_type.startswith("datetime_"):
+        return (
+            f"field '{error['loc'][0]}' is not an ISO-8601 timestamp string: {error.get('input')!r}"
         )
-
-    return JobRecord(
-        job_id=job_id,
-        status=status,
-        started_at=started_at,
-        finished_at=finished_at,
-        attempt=attempt,
-    )
-
-
-def _require(raw: dict[str, Any], field: str) -> Any:
-    if field not in raw or raw[field] is None:
-        raise RecordValidationError(f"missing field: {field}")
-    return raw[field]
-
-
-def _required_text(raw: dict[str, Any], field: str) -> str:
-    value = _require(raw, field)
-    if not isinstance(value, str):
-        raise RecordValidationError(f"field '{field}' must be a string")
-    value = value.strip()
-    if not value:
-        raise RecordValidationError(f"field '{field}' must not be blank")
-    return value
-
-
-def _parse_status(raw: dict[str, Any]) -> JobStatus:
-    value = _require(raw, "status")
-    if not isinstance(value, str):
-        raise RecordValidationError("field 'status' must be a string")
-    normalized = value.strip().lower()
-    try:
-        return JobStatus(normalized)
-    except ValueError:
-        expected = ", ".join(status.value for status in JobStatus)
-        raise RecordValidationError(
-            f"unknown status {value!r} (expected one of: {expected})"
-        ) from None
-
-
-def _parse_timestamp(raw: dict[str, Any], field: str, *, required: bool) -> datetime | None:
-    if field not in raw or raw[field] is None:
-        if required:
-            raise RecordValidationError(f"missing field: {field}")
-        return None
-    value = raw[field]
-    if not isinstance(value, str):
-        raise RecordValidationError(f"field '{field}' must be {_ISO_8601_HINT}")
-    try:
-        parsed = datetime.fromisoformat(value)
-    except ValueError:
-        raise RecordValidationError(f"field '{field}' is not {_ISO_8601_HINT}: {value!r}") from None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
-    return parsed
-
-
-def _parse_attempt(raw: dict[str, Any]) -> int:
-    value = _require(raw, "attempt")
-    # bool is a subclass of int; True/False are not valid attempts.
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise RecordValidationError("field 'attempt' must be an integer")
-    if value < 1:
-        raise RecordValidationError(f"field 'attempt' must be >= 1, got {value}")
-    return value
+    return str(error["msg"]).removeprefix(_VALUE_ERROR_PREFIX)

@@ -4,10 +4,13 @@ version = "0.1.0"
 description = "Summarize job execution records from a JSON file: totals, outcomes, durations, retries."
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "pydantic>=2.9",
+]
 
 [dependency-groups]
 dev = [
+    "mypy>=1.13",
     "pytest>=8.3",
     "ruff>=0.12",
 ]
