@@ -80,9 +80,7 @@ def independent_summary(raw_records: list) -> dict:
             attempt = record["attempt"]
             finished = None
             if record.get("finished_at") is not None:
-                finished = datetime.fromisoformat(
-                    str(record["finished_at"]).replace("Z", "+00:00")
-                )
+                finished = datetime.fromisoformat(str(record["finished_at"]).replace("Z", "+00:00"))
             if not isinstance(job_id, str) or not job_id.strip():
                 raise ValueError("bad job_id")
             if status not in ("success", "failed", "running"):
