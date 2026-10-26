@@ -104,3 +104,26 @@ class TestRetryDetection:
             make_record(job_id="job-b", attempt=2),
         ]
         assert calc.compute(records).retried_job_count == 2
+
+
+class TestStreamingInput:
+    def test_a_one_shot_iterable_is_consumed_exactly_once(self, make_record, calc):
+        # Streaming sources yield records once; a multi-pass implementation
+        # would see an exhausted iterator and silently miscount.
+        records = iter(
+            [
+                make_record(job_id="a"),
+                make_record(job_id="b", status=JobStatus.FAILED, attempt=2),
+                make_record(job_id="c", status=JobStatus.RUNNING, finished_at=None),
+            ]
+        )
+        report = calc.compute(records)
+        assert report.total_jobs == 3
+        assert report.successful_jobs == 1
+        assert report.failed_jobs == 1
+        assert report.retried_job_count == 1
+        assert report.average_successful_duration_seconds == 600.0
+
+    def test_a_one_shot_iterable_with_no_successful_jobs_has_no_average(self, make_record, calc):
+        records = iter([make_record(job_id="a", status=JobStatus.FAILED)])
+        assert calc.compute(records).average_successful_duration_seconds is None
