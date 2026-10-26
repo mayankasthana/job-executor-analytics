@@ -14,9 +14,11 @@ re-run of the same code.
 from __future__ import annotations
 
 import json
+import random
 import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -29,6 +31,7 @@ TOKENS = {
     "git": "GATE-GIT-OK",
     "readme": "GATE-README-OK",
     "agentic": "GATE-AGENTIC-OK",
+    "streaming": "GATE-STREAMING-OK",
 }
 
 README_SECTIONS = (
@@ -144,6 +147,41 @@ def gate_cli() -> None:
         fail("a missing input file must exit 2 with an error on stderr")
 
 
+def gate_streaming() -> None:
+    """End-to-end streaming check: the CLI streams its input, so on a dataset
+    large enough to span multiple read chunks it must still reproduce the
+    independent oracle exactly. Padding of randomized width pushes chunk
+    boundaries into tokens (strings, numbers)."""
+    rng = random.Random(20261027)
+    records = []
+    for index in range(20_000):
+        status = rng.choice(("success", "failed", "running"))
+        record = {
+            "job_id": f"job-{index:05d}",
+            "status": status,
+            "started_at": "2026-10-26T09:00:00Z",
+            "attempt": rng.choice((1, 1, 1, 2, 3)),
+            "padding": "x" * rng.randint(0, 240),
+        }
+        if status != "running":
+            minute = rng.randint(0, 600)
+            second = rng.randint(0, 59)
+            record["finished_at"] = (
+                f"2026-10-26T{9 + minute // 60:02d}:{minute % 60:02d}:{second:02d}Z"
+            )
+        records.append(record)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "big.json"
+        path.write_text(json.dumps(records), encoding="utf-8")
+        if path.stat().st_size < 3 * 1_048_576:
+            fail("synthetic dataset is too small to span multiple read chunks")
+        expected = independent_summary(records)
+        actual = run_cli(path, "--format", "json")
+        if actual != expected:
+            fail(f"streamed run mismatch:\n  cli:      {actual}\n  expected: {expected}")
+
+
 def gate_git() -> None:
     count = int(run("git", "rev-list", "--count", "HEAD").stdout.strip())
     if count < 8:
@@ -209,6 +247,7 @@ def main() -> None:
         "tests": gate_tests,
         "lint": gate_lint,
         "cli": gate_cli,
+        "streaming": gate_streaming,
         "git": gate_git,
         "readme": gate_readme,
         "agentic": gate_agentic,

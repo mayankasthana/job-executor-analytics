@@ -22,10 +22,11 @@ check: lint test  ## All static checks plus tests
 run:              ## Run the CLI on a JSON file: make run [SAMPLE=path/to/file.json]
 	uv run python -m job_analytics $(SAMPLE)
 
-verify:           ## Run all verification gates (tests, lint, CLI oracle, repo hygiene)
+verify:           ## Run all verification gates (tests, lint, CLI oracle, streaming, repo hygiene)
 	python3 scripts/verify.py tests
 	python3 scripts/verify.py lint
 	python3 scripts/verify.py cli
+	python3 scripts/verify.py streaming
 	python3 scripts/verify.py git
 	python3 scripts/verify.py readme
 	python3 scripts/verify.py agentic
