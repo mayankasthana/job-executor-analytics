@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tomllib
 from datetime import datetime
 from pathlib import Path
 
@@ -32,6 +33,9 @@ TOKENS = {
     "readme": "GATE-README-OK",
     "agentic": "GATE-AGENTIC-OK",
     "streaming": "GATE-STREAMING-OK",
+    "schema": "GATE-SCHEMA-OK",
+    "jobview": "GATE-JOBVIEW-OK",
+    "types": "GATE-TYPES-OK",
 }
 
 README_SECTIONS = (
@@ -69,8 +73,10 @@ def gate_lint() -> None:
             fail(f"{' '.join(command)} is not clean")
 
 
-def independent_summary(raw_records: list) -> dict:
-    """Recompute the expected summary from raw JSON, independently of the package."""
+def _independent_valid(
+    raw_records: list,
+) -> tuple[list[tuple[str, str, datetime, datetime | None, int]], int]:
+    """Validate raw records with independent logic; returns (valid, rejected_count)."""
     valid: list[tuple[str, str, datetime, datetime | None, int]] = []
     rejected = 0
     for record in raw_records:
@@ -96,6 +102,12 @@ def independent_summary(raw_records: list) -> dict:
             rejected += 1
             continue
         valid.append((job_id, status, started, finished, attempt))
+    return valid, rejected
+
+
+def independent_summary(raw_records: list) -> dict:
+    """Recompute the expected record-level summary from raw JSON, independently of the package."""
+    valid, rejected = _independent_valid(raw_records)
 
     durations = [
         (finished - started).total_seconds()
@@ -110,6 +122,38 @@ def independent_summary(raw_records: list) -> dict:
             sum(durations) / len(durations) if durations else None
         ),
         "jobs_requiring_retries": len({entry[0] for entry in valid if entry[4] > 1}),
+        "rejected_records": rejected,
+    }
+
+
+def independent_job_summary(raw_records: list) -> dict:
+    """Recompute the expected per-job summary (latest attempt wins), independently."""
+    valid, rejected = _independent_valid(raw_records)
+    final: dict[str, tuple[str, datetime, datetime | None, int]] = {}
+    retried: set[str] = set()
+    for job_id, status, started, finished, attempt in valid:
+        current = final.get(job_id)
+        if current is None or (attempt, started) >= (current[3], current[1]):
+            final[job_id] = (status, started, finished, attempt)
+        if attempt > 1:
+            retried.add(job_id)
+
+    successful = [(job_id, entry) for job_id, entry in final.items() if entry[0] == "success"]
+    durations = [
+        (finished - started).total_seconds()
+        for _, (_, started, finished, _) in successful
+        if finished is not None
+    ]
+    return {
+        "total_jobs": len(final),
+        "successful_jobs": len(successful),
+        "failed_jobs": sum(1 for entry in final.values() if entry[0] == "failed"),
+        "running_jobs": sum(1 for entry in final.values() if entry[0] == "running"),
+        "jobs_requiring_retries": len(retried),
+        "successful_after_retries": sum(1 for job_id, _ in successful if job_id in retried),
+        "average_final_attempt_duration_seconds": (
+            sum(durations) / len(durations) if durations else None
+        ),
         "rejected_records": rejected,
     }
 
@@ -182,6 +226,41 @@ def gate_streaming() -> None:
             fail(f"streamed run mismatch:\n  cli:      {actual}\n  expected: {expected}")
 
 
+def gate_schema() -> None:
+    """Validation must run on the pydantic schema behind the unchanged seam."""
+    pyproject = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
+    dependencies = pyproject["project"]["dependencies"]
+    if not any(dependency.startswith("pydantic") for dependency in dependencies):
+        fail("pydantic is not declared as a runtime dependency")
+    if run("python", "-c", "from job_analytics.schema import JobRecordSchema").returncode != 0:
+        fail("the declarative schema module is not importable")
+    result = run("python", "-m", "pytest", "tests/test_parsing.py", "-q", check=False)
+    if result.returncode != 0:
+        fail("the parsing seam behavior specs did not pass unchanged")
+
+
+def gate_jobview() -> None:
+    """The CLI's per-job view must match an independently recomputed oracle."""
+    for name in ("jobs.json", "jobs_malformed.json"):
+        path = REPO / "data" / name
+        raw_records = json.loads(path.read_text(encoding="utf-8"))
+        expected = independent_job_summary(raw_records)
+        actual = run_cli(path, "--view", "job", "--format", "json")
+        if actual != expected:
+            fail(f"job-view mismatch on {name}:\n  cli:      {actual}\n  expected: {expected}")
+    process = run(
+        "python", "-m", "job_analytics", str(REPO / "data" / "jobs.json"), "--view", "job"
+    )
+    if "(per job)" not in process.stdout or "Successful after retries: 2" not in process.stdout:
+        fail("the text report does not disclose the per-job metrics")
+
+
+def gate_types() -> None:
+    result = run("mypy", check=False)
+    if result.returncode != 0:
+        fail(f"mypy --strict found issues:\n{result.stdout}{result.stderr}")
+
+
 def gate_git() -> None:
     count = int(run("git", "rev-list", "--count", "HEAD").stdout.strip())
     if count < 8:
@@ -246,8 +325,11 @@ def main() -> None:
     gates = {
         "tests": gate_tests,
         "lint": gate_lint,
+        "types": gate_types,
         "cli": gate_cli,
         "streaming": gate_streaming,
+        "schema": gate_schema,
+        "jobview": gate_jobview,
         "git": gate_git,
         "readme": gate_readme,
         "agentic": gate_agentic,
