@@ -79,3 +79,42 @@ class TestFailurePropagation:
 
         with pytest.raises(InputFileError):
             JobAnalyticsApp(BrokenSource()).run()
+
+
+class TestStreamingSources:
+    def test_a_single_pass_generator_source_streams_end_to_end(self):
+        class GeneratorSource:
+            """Fake RecordSource yielding records one at a time."""
+
+            def __init__(self, records):
+                self._records = records
+
+            def read_records(self):
+                yield from self._records
+
+        def raw_records():
+            yield valid_raw()
+            yield "junk"
+            yield valid_raw(job_id="job-2", status="failed", attempt=2)
+
+        result = JobAnalyticsApp(GeneratorSource(raw_records())).run()
+        assert result.report.total_jobs == 2
+        assert result.report.successful_jobs == 1
+        assert result.report.failed_jobs == 1
+        assert result.report.retried_job_count == 1
+        assert [r.index for r in result.rejected_records] == [1]
+
+    def test_lazily_raised_source_errors_still_propagate(self):
+        class LazyBrokenSource:
+            def read_records(self):
+                yield {
+                    "job_id": "ok",
+                    "status": "success",
+                    "started_at": "2026-10-26T09:00:00Z",
+                    "finished_at": "2026-10-26T09:01:00Z",
+                    "attempt": 1,
+                }
+                raise InputFileError("disk blew up mid-file")
+
+        with pytest.raises(InputFileError):
+            JobAnalyticsApp(LazyBrokenSource()).run()
