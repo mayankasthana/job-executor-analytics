@@ -17,7 +17,10 @@ fmt:              ## Auto-format and fix lint findings
 	uv run ruff format .
 	uv run ruff check --fix .
 
-check: lint test  ## All static checks plus tests
+type:             ## Type-check the package with mypy --strict
+	uv run mypy
+
+check: lint type test  ## All static checks plus tests
 
 run:              ## Run the CLI on a JSON file: make run [SAMPLE=path/to/file.json]
 	uv run python -m job_analytics $(SAMPLE)

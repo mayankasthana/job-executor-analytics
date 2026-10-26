@@ -26,6 +26,11 @@ packages = ["src/job_analytics"]
 testpaths = ["tests"]
 addopts = "-ra"
 
+[tool.mypy]
+strict = true
+files = ["src/job_analytics"]
+python_version = "3.12"
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"
