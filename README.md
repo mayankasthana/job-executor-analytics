@@ -147,12 +147,23 @@ Data flows one way: `loading` produces raw values, `parsing` produces trusted
 knows where records came from, so a database or HTTP source only needs to
 implement `RecordSource.read_records()`.
 
+**Everything streams.** `JsonFileRecordSource` decodes the array one element at
+a time (`json.JSONDecoder.raw_decode` over chunked reads) and the app feeds
+parsed records straight into the calculator, which aggregates in a single pass.
+Peak memory is O(largest single record) plus the rejection details and the set
+of distinct retried job ids — never O(file size). A completeness guard
+re-decodes a token until a delimiter or EOF follows it, so a number split by a
+chunk boundary is never yielded truncated. Fatal document errors (invalid JSON,
+non-array root) surface at the start of iteration; per-record defects surface
+when reached.
+
 ## Assumptions and design decisions
 
 The exercise leaves several details open; these are the decisions made and why.
 
 1. **Document shape.** The input file is a single top-level JSON **array** of
-   records. Anything else (object, string, empty file) is a *fatal* input error
+   records, consumed as a stream (one element at a time — see "How it works").
+   Anything else (object, string, empty file) is a *fatal* input error
    with exit code 2 — distinguishable from per-record rejections.
 2. **Records are per-attempt.** A job that retried appears as multiple records
    sharing a `job_id` with increasing `attempt` numbers. Consequences:
@@ -202,15 +213,15 @@ make lint        # ruff check + format check
 make verify      # tests + lint + CLI-vs-oracle + repo hygiene gates
 ```
 
-The suite (87 tests) is written test-first and targets **public seams only** —
+The suite (109 tests) is written test-first and targets **public seams only** —
 no tests against private helpers, no mocks of internals:
 
 | Seam | What's specified |
 | --- | --- |
 | `parsing.parse_record` | Every validation rule, including the `bool`-as-`int` attempt trap, naive timestamps, out-of-order timestamps, and per-field error messages |
-| `loading.JsonFileRecordSource` | Array documents, empty arrays, missing files, invalid JSON, non-array roots |
-| `analytics.SummaryCalculator` | A hand-computed end-to-end scenario plus edge cases: empty input, failures-only, unfinished successes, retry counting per distinct job |
-| `app.JobAnalyticsApp` | Orchestration with a fake in-memory `RecordSource` — rejections keep their original positions; source errors propagate |
+| `loading.JsonFileRecordSource` | Array documents, empty arrays, missing files, invalid JSON, non-array roots; streaming laziness, error timing with line numbers, and chunk-boundary stress (sizes 1–64) with `json.loads` as the oracle |
+| `analytics.SummaryCalculator` | A hand-computed end-to-end scenario, edge cases (empty input, failures-only, unfinished successes, retry counting per distinct job), and one-shot iterable consumption |
+| `app.JobAnalyticsApp` | Orchestration with fake in-memory and generator sources — rejections keep their original positions; source errors propagate, including lazily raised ones |
 | `reporting` | Exact JSON payload (literal expected values), text content, rejection disclosure, reporter registry |
 | `cli.main` | End-to-end via `capsys` and a real `python -m job_analytics` subprocess: exit codes 0/2, stderr errors, malformed input still exiting 0 |
 
@@ -228,36 +239,33 @@ intended durations.
 
 Honest list, roughly in order of value:
 
-1. **Streaming for large files.** Records are loaded into memory
-   (`json.loads` + a list). For very large inputs, read line-delimited JSON or
-   stream-parse the array (`ijson`) and make `RecordSource` return an iterator.
-2. **Pydantic (or `TypeAdapter`) for schema validation.** Hand-rolled rules are
+1. **Pydantic (or `TypeAdapter`) for schema validation.** Hand-rolled rules are
    readable but grow; a schema library would centralize coercion and error
    messages if the record shape keeps evolving.
-3. **Job-level aggregation semantics.** The summary is record-level (see
+2. **Job-level aggregation semantics.** The summary is record-level (see
    assumption 2). A real deployment likely wants both views: per-record and
    per-job (latest attempt wins, first-attempt-to-success funnels, retry
    success rates). The `SummaryCalculator` seam is ready for a second strategy.
-4. **Retry-window definition.** "Required retries" currently ignores *when*
+3. **Retry-window definition.** "Required retries" currently ignores *when*
    attempts happened and which attempt ultimately succeeded. Time-aware retry
    analytics (e.g., success rate after N attempts) would be more actionable.
-5. **Output options.** `--output <file>`, CSV/markdown reporters (the registry
+4. **Output options.** `--output <file>`, CSV/markdown reporters (the registry
    makes this a two-class change), and a `--strict` flag that escalates any
    rejection to exit code 1 for pipelines that want fail-fast behavior.
-6. **Structured logging.** Rejections currently live only in the report; a
+5. **Structured logging.** Rejections currently live only in the report; a
    `logging` hook (or JSON-lines diagnostics stream) would help operators
    audit data quality over time.
-7. **Property-based tests.** `hypothesis` round-trip properties (e.g., summary
+6. **Property-based tests.** `hypothesis` round-trip properties (e.g., summary
    counts always sum consistently; parsing never raises anything other than
    `RecordValidationError`) would harden the parser beyond example cases.
-8. **Performance note.** Aggregation is O(n) with three passes over the list
-   (counts, durations, retry set). For this workload that is irrelevant; a
-   single-pass reducer would matter only at very large scale, and would cost
-   readability.
-9. **Packaging/publishing.** Console-script entry point (`[project.scripts]`),
+7. **Performance headroom.** The file is streamed and aggregation is a single
+   O(n) pass, so the remaining cost is per-element `raw_decode` versus one bulk
+   `json.loads` — a constant factor that only matters at extreme scale, where a
+   line-delimited JSON input format would be the better lever.
+8. **Packaging/publishing.** Console-script entry point (`[project.scripts]`),
    pinned lock for CI, a `LICENSE`, and publishing to a private index.
-10. **Type checking.** The code is fully annotated; adding `mypy --strict` (or
-    `pyright`) to CI would keep it that way.
+9. **Type checking.** The code is fully annotated; adding `mypy --strict` (or
+   `pyright`) to CI would keep it that way.
 
 ## Project structure
 

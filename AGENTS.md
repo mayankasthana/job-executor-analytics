@@ -37,7 +37,7 @@ src/job_analytics/
   models.py      domain types: JobStatus, JobRecord, RejectedRecord, SummaryReport
   errors.py      JobAnalyticsError hierarchy (RecordValidationError, InputFileError)
   parsing.py     raw JSON value -> validated JobRecord (or named rejection reason)
-  loading.py     RecordSource protocol + JsonFileRecordSource
+  loading.py     RecordSource protocol + streaming JSON-array file source
   analytics.py   SummaryCalculator: pure aggregation over valid records
   app.py         JobAnalyticsApp orchestration with dependency injection
   reporting.py   Reporter protocol, JsonReporter/TextReporter
@@ -57,6 +57,9 @@ scripts/         verify.py — verification gates
   instead of mocks of internals. No tests against private helpers.
 - **Runtime stays stdlib-only**; dev dependencies live in
   `[dependency-groups].dev` in `pyproject.toml`.
+- **Sources are single-pass**: `RecordSource.read_records()` may return a
+  one-shot iterator; consumers must drain it exactly once and must not
+  materialize records unless they truly need them.
 - Public API is re-exported from `src/job_analytics/__init__.py`.
 - Keep `ruff` clean: line length 100, rules `E,F,W,I,UP,B,SIM,RUF`.
 - Behavioral decisions and open questions live in the README's
