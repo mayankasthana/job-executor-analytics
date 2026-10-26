@@ -133,7 +133,13 @@ def gate_cli() -> None:
     if "Rejected records: 9" not in process.stdout:
         fail("text report does not disclose the expected 9 rejections")
 
-    missing = run("python", "-m", "job_analytics", str(REPO / "data" / "does-not-exist.json"))
+    missing = run(
+        "python",
+        "-m",
+        "job_analytics",
+        str(REPO / "data" / "does-not-exist.json"),
+        check=False,
+    )
     if missing.returncode != 2 or "error:" not in missing.stderr:
         fail("a missing input file must exit 2 with an error on stderr")
 
